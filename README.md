@@ -41,7 +41,7 @@ Instantly view calories, protein, fat, and other nutrition details for every rec
 |------------|----------------|---------------|
 | ![Home Page](assets/home.png) | ![Recipe](assets/recipe.png) | ![Planner](assets/planner.png) |
 
-*(Replace these with your actual screenshots)*
+
 
 ---
 
