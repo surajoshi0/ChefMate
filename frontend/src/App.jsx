@@ -7,8 +7,6 @@ const API_BASE_URL = 'http://localhost:5000/api';
 function App() {
   const [isListening, setIsListening] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [transcript, setTranscript] = useState('');
-  const [response, setResponse] = useState('');
   const [isPlaying, setIsPlaying] = useState(false);
   const [conversation, setConversation] = useState([]);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -113,9 +111,6 @@ function App() {
       console.log('Server response:', result);
 
       if (result.success) {
-        setTranscript(result.transcript);
-        setResponse(result.response);
-
         // Update conversation
         setConversation(prev => [
           ...prev,
