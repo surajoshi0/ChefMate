@@ -1,86 +1,152 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { Mic, MicOff, Play, ChefHat, MessageCircle, Menu, X } from 'lucide-react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import {
+  Mic, MicOff, Send, Trash2, MessageSquare,
+  ChefHat, Play, AlertCircle, Sparkles
+} from 'lucide-react';
 import './App.css';
 
-const API_BASE_URL = 'http://localhost:5000/api';
+const API_BASE_URL = '/api';
 
+// ── Static Data ────────────────────────────────────────────────
+const SUGGESTIONS = [
+  { emoji: '🍛', text: 'How do I make chicken biryani?' },
+  { emoji: '🥚', text: 'Substitute eggs in baking?' },
+  { emoji: '🧄', text: 'What pairs well with garlic?' },
+  { emoji: '🍝', text: 'Perfect al-dente pasta tips?' },
+  { emoji: '🔥', text: 'How to season a cast iron pan?' },
+  { emoji: '🥗', text: 'Quick healthy weeknight meals?' },
+];
+
+const RECIPES = [
+  { emoji: '🍛', name: 'Butter Chicken', time: '45 min', diff: 'Medium' },
+  { emoji: '🍕', name: 'Margherita Pizza', time: '30 min', diff: 'Easy' },
+  { emoji: '🍜', name: 'Ramen from Scratch', time: '3 hrs', diff: 'Hard' },
+  { emoji: '🥘', name: 'Dal Tadka', time: '40 min', diff: 'Easy' },
+  { emoji: '🫔', name: 'Street Tacos', time: '25 min', diff: 'Easy' },
+  { emoji: '🎂', name: 'Chocolate Cake', time: '1.5 hrs', diff: 'Medium' },
+];
+
+// ── Helpers ────────────────────────────────────────────────────
+const formatTime = () =>
+  new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+// ── Component ──────────────────────────────────────────────────
 function App() {
   const [isListening, setIsListening] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [conversation, setConversation] = useState([]);
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [textInput, setTextInput] = useState('');
   const [error, setError] = useState('');
-  
+
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const audioRef = useRef(null);
+  const messagesEndRef = useRef(null);
+  const textareaRef = useRef(null);
 
-  // Helper function for API calls
-  const apiCall = async (url, options = {}) => {
-    try {
-      const response = await fetch(url, options);
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
-      }
-      return response;
-    } catch (error) {
-      console.error('API call failed:', error);
-      throw error;
-    }
+  // Auto-scroll to latest message
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [conversation, isProcessing]);
+
+  // Test backend on mount
+  useEffect(() => {
+    fetch(`${API_BASE_URL}/health`)
+      .then(r => { if (!r.ok) throw new Error(); })
+      .catch(() => setError('Cannot connect to server. Make sure the backend is running.'));
+  }, []);
+
+  // Audio playback events
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    const onEnd = () => setIsPlaying(false);
+    const onErr = () => setIsPlaying(false);
+    audio.addEventListener('ended', onEnd);
+    audio.addEventListener('error', onErr);
+    return () => {
+      audio.removeEventListener('ended', onEnd);
+      audio.removeEventListener('error', onErr);
+    };
+  }, []);
+
+  // Auto-resize textarea
+  useEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    ta.style.height = 'auto';
+    ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
+  }, [textInput]);
+
+  // ── API helpers ──────────────────────────────────────────────
+  const addMessages = (userText, aiText) => {
+    const ts = formatTime();
+    setConversation(prev => [
+      ...prev,
+      { type: 'user', text: userText, time: ts },
+      { type: 'ai', text: aiText, time: ts },
+    ]);
   };
 
-  // Start voice recording
+  const sendTextMessage = useCallback(async (msg) => {
+    if (!msg.trim() || isProcessing) return;
+    setError('');
+    setIsProcessing(true);
+    setTextInput('');
+    try {
+      const res = await fetch(`${API_BASE_URL}/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: msg.trim() }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.error || `Error ${res.status}`);
+      }
+      const data = await res.json();
+      if (data.success) {
+        addMessages(msg.trim(), data.response);
+        if (data.audioUrl) {
+          setIsPlaying(true);
+          audioRef.current.src = data.audioUrl;
+          audioRef.current.play().catch(() => setIsPlaying(false));
+        }
+      } else {
+        throw new Error(data.error || 'Unknown error');
+      }
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setIsProcessing(false);
+    }
+  }, [isProcessing]);
+
+  // ── Voice recording ──────────────────────────────────────────
   const startListening = async () => {
     try {
       setError('');
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          sampleRate: 16000,
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true
-        } 
-      });
-      
-      // Check for supported MIME types
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       let mimeType = 'audio/webm';
       if (!MediaRecorder.isTypeSupported('audio/webm')) {
-        if (MediaRecorder.isTypeSupported('audio/mp4')) {
-          mimeType = 'audio/mp4';
-        } else if (MediaRecorder.isTypeSupported('audio/wav')) {
-          mimeType = 'audio/wav';
-        }
+        mimeType = MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : 'audio/wav';
       }
-      
-      const mediaRecorder = new MediaRecorder(stream, { mimeType });
-      
-      mediaRecorderRef.current = mediaRecorder;
+      const recorder = new MediaRecorder(stream, { mimeType });
+      mediaRecorderRef.current = recorder;
       audioChunksRef.current = [];
-
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-        }
+      recorder.ondataavailable = e => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
+      recorder.onstop = async () => {
+        const blob = new Blob(audioChunksRef.current, { type: mimeType });
+        stream.getTracks().forEach(t => t.stop());
+        await processAudio(blob);
       };
-
-      mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
-        await processAudio(audioBlob);
-        stream.getTracks().forEach(track => track.stop());
-      };
-
-      mediaRecorder.start(1000); // Collect data every second
+      recorder.start(500);
       setIsListening(true);
-      console.log('Started recording with MIME type:', mimeType);
-    } catch (error) {
-      console.error('Error accessing microphone:', error);
-      setError('Please allow microphone access to use voice features.');
+    } catch {
+      setError('Microphone access denied. Please allow microphone permissions.');
     }
   };
 
-  // Stop recording
   const stopListening = () => {
     if (mediaRecorderRef.current && isListening) {
       mediaRecorderRef.current.stop();
@@ -89,297 +155,275 @@ function App() {
     }
   };
 
-  // Process recorded audio
-  const processAudio = async (audioBlob) => {
+  const processAudio = async (blob) => {
     try {
-      console.log('Processing audio blob, size:', audioBlob.size);
-      
-      if (audioBlob.size === 0) {
-        throw new Error('No audio data recorded');
+      if (blob.size === 0) throw new Error('No audio data recorded');
+      const form = new FormData();
+      form.append('audio', blob, 'recording.webm');
+      const res = await fetch(`${API_BASE_URL}/process-voice`, { method: 'POST', body: form });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.error || `Error ${res.status}`);
       }
-
-      // Create FormData and send to backend
-      const formData = new FormData();
-      formData.append('audio', audioBlob, 'recording.webm');
-
-      const response = await apiCall(`${API_BASE_URL}/process-voice`, {
-        method: 'POST',
-        body: formData
-      });
-
-      const result = await response.json();
-      console.log('Server response:', result);
-
-      if (result.success) {
-        // Update conversation
-        setConversation(prev => [
-          ...prev,
-          { type: 'user', text: result.transcript },
-          { type: 'ai', text: result.response }
-        ]);
-
-        // Play audio response if available
-        if (result.audioUrl) {
-          await playAudioFromUrl(result.audioUrl);
-        } else {
-          // Fallback: simulate audio playback
-          console.log('No audio URL provided, simulating playback');
+      const data = await res.json();
+      if (data.success) {
+        addMessages(data.transcript, data.response);
+        if (data.audioUrl) {
           setIsPlaying(true);
-          setTimeout(() => setIsPlaying(false), 3000);
+          audioRef.current.src = data.audioUrl;
+          audioRef.current.play().catch(() => setIsPlaying(false));
         }
-      } else {
-        throw new Error(result.error || 'Failed to process audio');
-      }
-
-    } catch (error) {
-      console.error('Error processing audio:', error);
-      setError(`Error: ${error.message}`);
+      } else throw new Error(data.error);
+    } catch (e) {
+      setError(e.message);
     } finally {
       setIsProcessing(false);
     }
   };
 
-  // Play audio from URL (for Vapi AI response)
-  const playAudioFromUrl = async (audioUrl) => {
-    try {
-      setIsPlaying(true);
-      
-      if (audioRef.current) {
-        audioRef.current.src = audioUrl;
-        await audioRef.current.play();
-      }
-    } catch (error) {
-      console.error('Error playing audio:', error);
-      setIsPlaying(false);
+  // ── UI helpers ───────────────────────────────────────────────
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendTextMessage(textInput);
     }
   };
 
-  // Handle audio playback events
-  useEffect(() => {
-    const audio = audioRef.current;
-    if (audio) {
-      const handleEnded = () => setIsPlaying(false);
-      const handleError = () => {
-        console.error('Audio playback error');
-        setIsPlaying(false);
-      };
-      
-      audio.addEventListener('ended', handleEnded);
-      audio.addEventListener('error', handleError);
-      
-      return () => {
-        audio.removeEventListener('ended', handleEnded);
-        audio.removeEventListener('error', handleError);
-      };
-    }
-  }, []);
-
-  // Test server connection on component mount
-  useEffect(() => {
-    const testConnection = async () => {
-      try {
-        await apiCall(`${API_BASE_URL}/health`);
-        console.log('Server connection successful');
-      } catch (error) {
-        console.error('Server connection failed:', error);
-        setError('Cannot connect to server. Please make sure the backend is running.');
-      }
-    };
-
-    testConnection();
-  }, []);
-
-  // Get button class based on state
-  const getButtonClass = () => {
-    if (isProcessing) return 'voice-button processing';
-    if (isListening) return 'voice-button listening';
-    return 'voice-button idle';
+  const handleSuggestion = (text) => {
+    sendTextMessage(text);
   };
 
-  // Get status info
-  const getStatusInfo = () => {
-    if (error) return { text: error, className: 'status-text error' };
-    if (isProcessing) return { text: 'Processing your request...', className: 'status-text processing' };
-    if (isListening) return { text: 'Listening... Tap to stop', className: 'status-text listening' };
-    return { text: 'Tap the microphone to start', className: 'status-text idle' };
+  const handleRecipeClick = (recipe) => {
+    sendTextMessage(`Tell me how to make ${recipe.name}`);
   };
 
-  const statusInfo = getStatusInfo();
+  const clearConversation = () => {
+    setConversation([]);
+    setError('');
+  };
 
+  const voiceBtnClass = isProcessing ? 'processing' : isListening ? 'listening' : 'idle';
+
+  // ══════════════════════════════════════════════════════════════
   return (
-    <div className="app-container">
-      {/* Header */}
-      <header className="header">
-        <div className="header-container">
-          <div className="header-content">
-            <div className="header-logo">
-              <div className="header-icon-container">
-                <ChefHat className="header-icon" />
-                <div className="header-status-dot"></div>
-              </div>
-              <div>
-                <h1 className="header-title">Rasoi</h1>
-                <p className="header-subtitle">Your Voice Kitchen Assistant</p>
-              </div>
+    <div className="app-root">
+      {/* ── Header ── */}
+      <header className="app-header">
+        <div className="header-inner">
+          <div className="header-brand">
+            <div className="brand-icon-wrap">
+              <ChefHat />
+              <span className="brand-dot" />
             </div>
-            
-            {/* Mobile menu button */}
-            <button
-              className="mobile-menu-button"
-              onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-            >
-              {isMobileMenuOpen ? <X /> : <Menu />}
-            </button>
-
-            {/* Desktop badge */}
-            <div className="header-badge">
-              <span className="header-badge-text">Voice Enabled</span>
-              <div className="header-status-indicator"></div>
+            <div>
+              <div className="brand-name">Rasoi</div>
+              <div className="brand-tagline">AI Kitchen Assistant</div>
             </div>
           </div>
-
-          {/* Mobile menu */}
-          {isMobileMenuOpen && (
-            <div className="mobile-menu">
-              <div className="mobile-menu-content">
-                <span className="header-badge-text">Voice Enabled</span>
-                <div className="header-status-indicator"></div>
-              </div>
-            </div>
-          )}
+          <div className="header-status">
+            <span className="status-dot" />
+            AI Online
+          </div>
         </div>
       </header>
 
-      <div className="main-container">
-        {/* Main Voice Interface */}
-        <div className="voice-interface">
-          <h2 className="voice-interface-title">
-            Ask me anything about cooking!
-          </h2>
-          <p className="voice-interface-description">
-            Tap the microphone and ask about recipes, cooking tips, ingredient substitutions, or any culinary questions
-          </p>
+      {/* ── Main ── */}
+      <main className="app-main">
 
-          {/* Voice Control Button */}
-          <div className="voice-button-container">
-            <button
-              onClick={isListening ? stopListening : startListening}
-              disabled={isProcessing}
-              className={getButtonClass()}
-            >
-              {isProcessing ? (
-                <div className="loading-spinner"></div>
-              ) : isListening ? (
-                <MicOff />
-              ) : (
-                <Mic />
-              )}
-            </button>
+        {/* ── Sidebar ── */}
+        <aside className="sidebar">
+          {/* Quick Suggestions */}
+          <div className="sidebar-card" style={{ animationDelay: '0.1s' }}>
+            <div className="sidebar-card-title">✨ Quick Ask</div>
+            <div className="suggestions-list">
+              {SUGGESTIONS.map((s, i) => (
+                <button
+                  key={i}
+                  className="suggestion-chip"
+                  onClick={() => handleSuggestion(s.text)}
+                  disabled={isProcessing}
+                >
+                  <span className="chip-emoji">{s.emoji}</span>
+                  {s.text}
+                </button>
+              ))}
+            </div>
           </div>
 
-          {/* Status Text */}
-          <div className="status-container">
-            <p className={statusInfo.className}>{statusInfo.text}</p>
-            {isListening && (
-              <div className="listening-dots">
-                <div className="listening-dot"></div>
-                <div className="listening-dot"></div>
-                <div className="listening-dot"></div>
+          {/* Recipe Quick Links */}
+          <div className="sidebar-card" style={{ animationDelay: '0.2s' }}>
+            <div className="sidebar-card-title">🍽️ Popular Recipes</div>
+            <div className="recipe-cards-list">
+              {RECIPES.slice(0, 4).map((r, i) => (
+                <div key={i} className="recipe-mini-card" onClick={() => handleRecipeClick(r)}>
+                  <span className="recipe-emoji">{r.emoji}</span>
+                  <div className="recipe-info">
+                    <div className="recipe-name">{r.name}</div>
+                    <div className="recipe-meta">{r.time} · {r.diff}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </aside>
+
+        {/* ── Content ── */}
+        <div className="content-area">
+
+          {/* Voice + Text Input Card */}
+          <div className="assistant-card">
+            <h1 className="assistant-title">Ask me anything about cooking</h1>
+            <p className="assistant-subtitle">
+              Use your voice or type — I'm here to help in the kitchen
+            </p>
+
+            {/* Voice Button */}
+            <div className="voice-btn-wrap">
+              <button
+                className={`voice-btn ${voiceBtnClass}`}
+                onClick={isListening ? stopListening : startListening}
+                disabled={isProcessing}
+                title={isListening ? 'Stop recording' : 'Start voice input'}
+              >
+                {isProcessing
+                  ? <div className="spinner" />
+                  : isListening
+                    ? <MicOff />
+                    : <Mic />
+                }
+                {isListening && <span className="voice-btn-ring" />}
+              </button>
+
+              <div>
+                <p className={`voice-status ${isProcessing ? 'processing' : isListening ? 'listening' : 'idle'}`}>
+                  {isProcessing
+                    ? 'Processing…'
+                    : isListening
+                      ? 'Listening — tap to stop'
+                      : 'Tap mic to speak'}
+                </p>
+                {isListening && (
+                  <div className="listen-dots">
+                    <span className="listen-dot" />
+                    <span className="listen-dot" />
+                    <span className="listen-dot" />
+                  </div>
+                )}
               </div>
-            )}
+            </div>
+
+            {/* Divider */}
+            <div className="or-divider">or type a message</div>
+
+            {/* Text input */}
+            <div className="chat-input-row">
+              <textarea
+                ref={textareaRef}
+                className="chat-input"
+                placeholder="Ask anything about cooking, recipes, ingredients…"
+                value={textInput}
+                onChange={e => setTextInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                disabled={isProcessing || isListening}
+                rows={1}
+              />
+              <button
+                className="send-btn"
+                onClick={() => sendTextMessage(textInput)}
+                disabled={!textInput.trim() || isProcessing || isListening}
+                title="Send"
+              >
+                <Send />
+              </button>
+            </div>
           </div>
 
-          {/* Audio Player */}
-          <audio ref={audioRef} style={{ display: 'none' }} />
-          
-          {isPlaying && (
-            <div className="playing-indicator">
-              <Play />
-              <span>Playing response...</span>
+          {/* Recipe Inspiration Cards */}
+          <div className="recipe-section">
+            <div className="section-title">🍳 Recipe Inspiration</div>
+            <div className="recipe-scroll">
+              {RECIPES.map((r, i) => (
+                <div key={i} className="recipe-card" onClick={() => handleRecipeClick(r)}>
+                  <div className="recipe-card-emoji">{r.emoji}</div>
+                  <div className="recipe-card-name">{r.name}</div>
+                  <div className="recipe-card-meta">{r.time} · {r.diff}</div>
+                </div>
+              ))}
             </div>
-          )}
-        </div>
+          </div>
 
-        {/* Conversation History */}
-        {conversation.length > 0 && (
-          <div className="conversation-container">
-            <div className="conversation-header">
-              <MessageCircle />
-              <h3 className="conversation-title">Conversation</h3>
-              <span className="conversation-counter">
-                {Math.floor(conversation.length / 2)} exchanges
-              </span>
-            </div>
-            
-            <div className="conversation-content">
-              <div className="conversation-messages">
-                {conversation.map((message, index) => (
-                  <div
-                    key={index}
-                    className={`message-container ${message.type} animate-fade-in-up`}
-                    style={{ animationDelay: `${index * 100}ms` }}
-                  >
-                    <div className={`message-bubble ${message.type}`}>
-                      <p className="message-text">{message.text}</p>
+          {/* Conversation Panel */}
+          {(conversation.length > 0 || isProcessing || error) && (
+            <div className="conversation-panel">
+              <div className="conv-header">
+                <div className="conv-header-left">
+                  <MessageSquare />
+                  <span className="conv-title">Conversation</span>
+                  {conversation.length > 0 && (
+                    <span className="conv-count">{Math.ceil(conversation.length / 2)}</span>
+                  )}
+                </div>
+                <button className="clear-btn" onClick={clearConversation} title="Clear chat">
+                  <Trash2 /> Clear
+                </button>
+              </div>
+
+              {/* Error banner */}
+              {error && (
+                <div className="error-banner">
+                  <AlertCircle />
+                  {error}
+                </div>
+              )}
+
+              {/* Playing indicator */}
+              {isPlaying && (
+                <div className="playing-bar">
+                  <Play /> Playing response…
+                </div>
+              )}
+
+              <div className="conv-messages">
+                {conversation.length === 0 && !isProcessing ? (
+                  <div className="empty-state">
+                    <span className="empty-icon">💬</span>
+                    <span className="empty-text">Your conversation will appear here</span>
+                  </div>
+                ) : (
+                  conversation.map((msg, i) => (
+                    <div key={i} className={`msg-row ${msg.type}`}>
+                      <div className={`msg-avatar ${msg.type === 'user' ? 'user-av' : 'ai-av'}`}>
+                        {msg.type === 'user' ? '👤' : '🤖'}
+                      </div>
+                      <div className="msg-bubble-wrap">
+                        <div className={`msg-bubble ${msg.type}`}>{msg.text}</div>
+                        <span className="msg-time">{msg.time}</span>
+                      </div>
+                    </div>
+                  ))
+                )}
+
+                {/* Typing indicator */}
+                {isProcessing && !isListening && (
+                  <div className="msg-row ai typing-indicator">
+                    <div className="msg-avatar ai-av">🤖</div>
+                    <div className="typing-dots">
+                      <span className="typing-dot" />
+                      <span className="typing-dot" />
+                      <span className="typing-dot" />
                     </div>
                   </div>
-                ))}
+                )}
+
+                <div ref={messagesEndRef} />
               </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {/* Features Grid */}
-        <div className="features-grid">
-          <div className="feature-card animate-fade-in-up" style={{ animationDelay: '0ms' }}>
-            <div className="feature-icon-container purple">
-              <ChefHat className="feature-icon purple" />
-            </div>
-            <h3 className="feature-title">Recipe Assistance</h3>
-            <p className="feature-description">
-              Get step-by-step cooking instructions and detailed recipes for any dish
-            </p>
-          </div>
-          
-          <div className="feature-card animate-fade-in-up" style={{ animationDelay: '200ms' }}>
-            <div className="feature-icon-container violet">
-              <MessageCircle className="feature-icon violet" />
-            </div>
-            <h3 className="feature-title">Cooking Tips</h3>
-            <p className="feature-description">
-              Learn professional techniques and time-saving shortcuts from expert chefs
-            </p>
-          </div>
-          
-          <div className="feature-card animate-fade-in-up" style={{ animationDelay: '400ms' }}>
-            <div className="feature-icon-container plump">
-              <Mic className="feature-icon plump" />
-            </div>
-            <h3 className="feature-title">Voice Control</h3>
-            <p className="feature-description">
-              Hands-free kitchen assistance while you cook - no need to touch your device
-            </p>
-          </div>
         </div>
+      </main>
 
-        {/* Footer */}
-        <div className="footer">
-          <div className="footer-container">
-            <h3 className="footer-title">Ready to Cook?</h3>
-            <p className="footer-description">
-              Start by asking about your favorite dish or cooking challenge
-            </p>
-            <div className="footer-tags">
-              <span className="footer-tag">Pasta recipes</span>
-              <span className="footer-tag">Baking tips</span>
-              <span className="footer-tag">Spice combinations</span>
-              <span className="footer-tag">Quick meals</span>
-              <span className="footer-tag">Healthy options</span>
-              <span className="footer-tag">Desserts</span>
-            </div>
-          </div>
-        </div>
-      </div>
+      <audio ref={audioRef} style={{ display: 'none' }} />
     </div>
   );
 }

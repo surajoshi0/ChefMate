@@ -3,223 +3,191 @@ const multer = require('multer');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
-const FormData = require('form-data');
 const axios = require('axios');
 require('dotenv').config();
+
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// Gemini client
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
 // Middleware
-app.use(cors());
+const allowedOrigins = [
+  'http://localhost:5173', // Vite dev server
+  'http://localhost:4173', // Vite preview
+  process.env.FRONTEND_URL,
+].filter(Boolean);
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error(`CORS: origin ${origin} not allowed`));
+    }
+  },
+  credentials: true,
+}));
 app.use(express.json());
 
 // Configure multer for file uploads
 const storage = multer.memoryStorage();
-const upload = multer({ 
-  storage: storage,
-  limits: {
-    fileSize: 25 * 1024 * 1024, // 25MB limit
-  }
+const upload = multer({
+  storage,
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB
 });
 
 // Ensure uploads directory exists
 const uploadsDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 
-// Health check endpoint
+// ── Health check ────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', message: 'Server is running' });
 });
 
-// Speech-to-Text using OpenAI Whisper API
-async function transcribeAudio(audioBuffer, filename) {
+// ── Gemini: transcribe audio ────────────────────────────────────
+// Gemini 1.5 Flash can understand audio inline via base64
+async function transcribeAudio(audioBuffer, mimeType = 'audio/webm') {
   try {
-    // Create form data for OpenAI Whisper API
-    const formData = new FormData();
-    formData.append('file', audioBuffer, {
-      filename: filename,
-      contentType: 'audio/webm'
-    });
-    formData.append('model', 'whisper-1');
-    formData.append('language', 'en'); // You can make this dynamic
-
-    const response = await axios.post('https://api.openai.com/v1/audio/transcriptions', formData, {
-      headers: {
-        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-        ...formData.getHeaders()
-      }
-    });
-
-    return response.data.text;
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    const audioPart = {
+      inlineData: {
+        data: audioBuffer.toString('base64'),
+        mimeType,
+      },
+    };
+    const result = await model.generateContent([
+      audioPart,
+      'Transcribe this audio exactly as spoken. Return only the transcription text, nothing else.',
+    ]);
+    return result.response.text().trim();
   } catch (error) {
-    console.error('Transcription error:', error.response?.data || error.message);
+    console.error('Gemini transcription error:', error.message);
     throw new Error('Failed to transcribe audio');
   }
 }
 
-// Generate cooking response using OpenAI
+// ── Gemini: generate cooking response ──────────────────────────
 async function generateCookingResponse(userQuery) {
   try {
-    const response = await axios.post('https://api.openai.com/v1/chat/completions', {
-      model: 'gpt-4',
-      messages: [
-        {
-          role: 'system',
-          content: `We are Rasoi, a helpful kitchen assistant AI. You specialize in cooking, recipes, ingredient substitutions, cooking techniques, and culinary advice. 
-          Provide clear, practical, and helpful responses about cooking. Keep responses conversational but informative. 
-          If asked about non-cooking topics, politely redirect to cooking-related assistance.`
-        },
-        {
-          role: 'user',
-          content: userQuery
-        }
-      ],
-      max_tokens: 500,
-      temperature: 0.7
-    }, {
-      headers: {
-        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-        'Content-Type': 'application/json'
-      }
+    const model = genAI.getGenerativeModel({
+      model: 'gemini-1.5-flash',
+      systemInstruction: `You are Rasoi, a knowledgeable and friendly AI kitchen assistant.
+You specialise in cooking, recipes, ingredient substitutions, cooking techniques, and culinary advice.
+Keep responses conversational, practical, and informative. Use helpful formatting (bullet points, steps) where it adds clarity.
+If asked about unrelated topics, politely redirect to cooking assistance.`,
     });
 
-    return response.data.choices[0].message.content;
+    const result = await model.generateContent(userQuery);
+    return result.response.text().trim();
   } catch (error) {
-    console.error('OpenAI response error:', error.response?.data || error.message);
+    console.error('Gemini chat error:', error.message);
     throw new Error('Failed to generate response');
   }
 }
 
-// VAPI AI Integration - Text-to-Speech
+// ── Vapi AI: Text-to-Speech (unchanged, optional) ──────────────
 async function generateVapiSpeech(text) {
+  if (!process.env.VAPI_API_KEY) {
+    return { success: false, audioUrl: null };
+  }
   try {
     const response = await axios.post('https://api.vapi.ai/call', {
       assistant: {
-        voice: {
-          provider: "eleven-labs", // or your preferred provider
-          voiceId: "your-voice-id"
-        }
+        voice: { provider: 'eleven-labs', voiceId: 'your-voice-id' },
       },
-      message: text
+      message: text,
     }, {
       headers: {
-        'Authorization': `Bearer ${process.env.VAPI_API_KEY}`,
-        'Content-Type': 'application/json'
-      }
+        Authorization: `Bearer ${process.env.VAPI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
     });
-    
-    return {
-      success: true,
-      audioUrl: response.data.audioUrl // Adjust based on Vapi's response format
-    };
+    return { success: true, audioUrl: response.data.audioUrl || null };
   } catch (error) {
     console.error('Vapi AI error:', error.response?.data || error.message);
-    throw new Error('Failed to generate speech with Vapi AI');
+    return { success: false, audioUrl: null };
   }
 }
 
-// Main endpoint to process voice input
+// ── Route: process voice ────────────────────────────────────────
 app.post('/api/process-voice', upload.single('audio'), async (req, res) => {
   try {
-    console.log('Received voice processing request');
-    
     if (!req.file) {
       return res.status(400).json({ error: 'No audio file provided' });
     }
 
     const audioBuffer = req.file.buffer;
-    const filename = `audio_${Date.now()}.webm`;
-    
-    console.log(`Processing audio file: ${filename}, size: ${audioBuffer.length} bytes`);
+    // Detect MIME from original upload (fallback to webm)
+    const mimeType = req.file.mimetype || 'audio/webm';
+    console.log(`Processing audio: ${audioBuffer.length} bytes (${mimeType})`);
 
-    // Step 1: Transcribe audio to text using OpenAI Whisper
-    console.log('Transcribing audio...');
-    const transcript = await transcribeAudio(audioBuffer, filename);
-    console.log('Transcription result:', transcript);
+    // Step 1: Transcribe
+    console.log('Transcribing with Gemini…');
+    const transcript = await transcribeAudio(audioBuffer, mimeType);
+    console.log('Transcript:', transcript);
 
-    // Step 2: Generate cooking response using OpenAI
-    console.log('Generating cooking response...');
+    // Step 2: Generate response
+    console.log('Generating cooking response with Gemini…');
     const cookingResponse = await generateCookingResponse(transcript);
-    console.log('Cooking response generated');
 
-    // Step 3: Convert response to speech using Vapi AI (placeholder)
-    console.log('Generating speech with Vapi AI...');
+    // Step 3: Optional TTS
     const speechResult = await generateVapiSpeech(cookingResponse);
-    console.log('Speech generation result:', speechResult);
 
-    // Return the complete response
     res.json({
       success: true,
-      transcript: transcript,
+      transcript,
       response: cookingResponse,
-      audioUrl: speechResult.audioUrl || null, // Will be null until Vapi is configured
-      vapiReady: speechResult.success
+      audioUrl: speechResult.audioUrl || null,
+      vapiReady: speechResult.success,
     });
-
   } catch (error) {
-    console.error('Error processing voice:', error);
-    res.status(500).json({ 
-      error: 'Failed to process voice input',
-      details: error.message 
-    });
+    console.error('Error processing voice:', error.message);
+    res.status(500).json({ error: 'Failed to process voice input', details: error.message });
   }
 });
 
-// Endpoint for text-only queries (optional)
+// ── Route: text chat ────────────────────────────────────────────
 app.post('/api/chat', async (req, res) => {
   try {
     const { message } = req.body;
-    
-    if (!message) {
-      return res.status(400).json({ error: 'No message provided' });
-    }
+    if (!message) return res.status(400).json({ error: 'No message provided' });
 
-    console.log('Processing text query:', message);
-
-    // Generate cooking response
+    console.log('Chat query:', message);
     const cookingResponse = await generateCookingResponse(message);
-
-    // Generate speech response using Vapi AI
     const speechResult = await generateVapiSpeech(cookingResponse);
 
     res.json({
       success: true,
       response: cookingResponse,
       audioUrl: speechResult.audioUrl || null,
-      vapiReady: speechResult.success
+      vapiReady: speechResult.success,
     });
-
   } catch (error) {
-    console.error('Error processing chat:', error);
-    res.status(500).json({ 
-      error: 'Failed to process message',
-      details: error.message 
-    });
+    console.error('Error processing chat:', error.message);
+    res.status(500).json({ error: 'Failed to process message', details: error.message });
   }
 });
 
-// Error handling middleware
+// ── Global error handler ────────────────────────────────────────
 app.use((error, req, res, next) => {
   console.error('Unhandled error:', error);
-  res.status(500).json({ 
-    error: 'Internal server error',
-    details: error.message 
-  });
+  res.status(500).json({ error: 'Internal server error', details: error.message });
 });
 
-// Start server
+// ── Start ───────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/api/health`);
-  
-  // Check for required environment variables
-  if (!process.env.OPENAI_API_KEY) {
-    console.warn('⚠️  OPENAI_API_KEY not found in environment variables');
+
+  if (!process.env.GEMINI_API_KEY) {
+    console.warn('⚠️  GEMINI_API_KEY not set in .env');
   }
   if (!process.env.VAPI_API_KEY) {
-    console.warn('⚠️  VAPI_API_KEY not found in environment variables');
+    console.warn('ℹ️  VAPI_API_KEY not set — TTS disabled');
   }
 });
